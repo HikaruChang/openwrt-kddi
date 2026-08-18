@@ -1,0 +1,31 @@
+{
+	"admin/network/kddi": {
+		"title": "KDDI au HIKARI",
+		"order": 60,
+		"action": {
+			"type": "firstchild"
+		},
+		"depends": {
+			"acl": [ "luci-app-kddi" ],
+			"fs": { "/etc/config/kddi": "file" }
+		}
+	},
+
+	"admin/network/kddi/overview": {
+		"title": "Overview",
+		"order": 10,
+		"action": {
+			"type": "view",
+			"path": "kddi/overview"
+		}
+	},
+
+	"admin/network/kddi/settings": {
+		"title": "Settings",
+		"order": 20,
+		"action": {
+			"type": "view",
+			"path": "kddi/settings"
+		}
+	}
+}

@@ -1,0 +1,253 @@
+#!/bin/sh
+# Powered by NyphexAI
+# Developed by Hikaru (i@rua.moe)
+# Copyright (C) 2026 Hikaru Chang <i@rua.moe>
+# SPDX-License-Identifier: GPL-3.0-or-later
+# ubus/rpcd backend for luci-app-kddi
+
+. /lib/functions.sh
+. /usr/share/libubox/jshn.sh
+. /usr/libexec/kddi/kddi-common.sh
+
+num() {
+	case "$1" in
+		''|*[!0-9]*) echo 0 ;;
+		*) printf "%d" "$1" ;;
+	esac
+}
+
+jf() {
+	jsonfilter -q -s "$1" -e "$2" 2>/dev/null
+}
+
+add_string_array() {
+	local name="$1" values="$2" v
+
+	json_add_array "$name"
+	for v in $values; do
+		json_add_string "" "$v"
+	done
+	json_close_array
+}
+
+status_iface4() {
+	local iface="$1" st
+
+	json_add_object "wan"
+	json_add_string "name" "$iface"
+
+	st="$(ubus call "network.interface.$iface" status 2>/dev/null)"
+	if [ -n "$st" ]; then
+		json_add_boolean "configured" 1
+		json_add_boolean "up" "$([ "$(jf "$st" '@.up')" = "true" ] && echo 1 || echo 0)"
+		json_add_string "proto" "$(jf "$st" '@.proto')"
+		json_add_string "device" "$(jf "$st" '@.l3_device')"
+		json_add_int "uptime" "$(num "$(jf "$st" '@.uptime' | head -n1)")"
+		json_add_string "ipaddr" "$(jf "$st" '@["ipv4-address"][0].address')"
+		json_add_int "mask" "$(num "$(jf "$st" '@["ipv4-address"][0].mask')")"
+		json_add_string "gateway" "$(jf "$st" '@.route[@.target="0.0.0.0"].nexthop' | head -n1)"
+		json_add_int "leasetime" "$(num "$(jf "$st" '@.data.leasetime')")"
+		json_add_string "server" "$(jf "$st" '@.data.dhcpserver')"
+		add_string_array "dns" "$(jf "$st" '@["dns-server"][*]')"
+	else
+		json_add_boolean "configured" 0
+	fi
+	json_close_object
+}
+
+status_iface6() {
+	local iface="$1" st
+
+	json_add_object "wan6"
+	json_add_string "name" "$iface"
+
+	st="$(ubus call "network.interface.$iface" status 2>/dev/null)"
+	if [ -n "$st" ]; then
+		json_add_boolean "configured" 1
+		json_add_boolean "up" "$([ "$(jf "$st" '@.up')" = "true" ] && echo 1 || echo 0)"
+		json_add_string "device" "$(jf "$st" '@.l3_device')"
+		json_add_int "uptime" "$(num "$(jf "$st" '@.uptime' | head -n1)")"
+		json_add_string "prefix" "$(jf "$st" '@["ipv6-prefix"][0].address')/$(jf "$st" '@["ipv6-prefix"][0].mask')"
+		json_add_string "address" "$(jf "$st" '@["ipv6-address"][0].address')"
+		add_string_array "dns" "$(jf "$st" '@["dns-server"][*]')"
+	else
+		json_add_boolean "configured" 0
+	fi
+	json_close_object
+}
+
+status_map() {
+	local iface="$1" st name
+
+	json_add_object "map"
+	name="${iface}_4"
+	st="$(ubus call "network.interface.$name" status 2>/dev/null)"
+	if [ -n "$st" ]; then
+		json_add_boolean "present" 1
+		json_add_string "name" "$name"
+		json_add_string "proto" "$(jf "$st" '@.proto')"
+		json_add_boolean "up" "$([ "$(jf "$st" '@.up')" = "true" ] && echo 1 || echo 0)"
+		json_add_string "ipaddr" "$(jf "$st" '@["ipv4-address"][0].address')"
+	else
+		json_add_boolean "present" 0
+	fi
+	json_close_object
+}
+
+status_dot1x() {
+	local dev="$1" st state=""
+
+	json_add_object "dot1x"
+	json_add_boolean "enabled" "${DOT1X_ENABLED:-0}"
+	json_add_string "eap" "$DOT1X_EAP"
+	json_add_boolean "supplicant_installed" "$([ -x /usr/sbin/wpa_supplicant ] && echo 1 || echo 0)"
+	json_add_boolean "cli_installed" "$([ -x /usr/sbin/wpa_cli ] && echo 1 || echo 0)"
+
+	if pgrep -f "wpa_supplicant .*$KDDI_WPA_CONF" >/dev/null 2>&1; then
+		json_add_boolean "running" 1
+	else
+		json_add_boolean "running" 0
+	fi
+
+	if [ -x /usr/sbin/wpa_cli ] && [ -n "$dev" ]; then
+		st="$(/usr/sbin/wpa_cli -i "$dev" -p "$KDDI_WPA_CTRL" status 2>/dev/null)"
+		state="$(echo "$st" | sed -n 's/^wpa_state=//p')"
+		json_add_string "state" "$state"
+		json_add_string "eap_state" "$(echo "$st" | sed -n 's/^EAP state=//p')"
+		json_add_string "port_status" "$(echo "$st" | sed -n 's/^suppPortStatus=//p')"
+	fi
+	json_close_object
+}
+
+status_fingerprint() {
+	local duid fqdn
+
+	duid="$(kddi_duid_ll "$KDDI_MACADDR" 2>/dev/null)"
+	fqdn="$(kddi_fqdn_hex "$KDDI_MODEL" 2>/dev/null)"
+
+	json_add_object "fingerprint"
+	json_add_string "vendorid" "$KDDI_VENDORID"
+	json_add_string "vendorid_hex" "$(kddi_str_hex "$KDDI_VENDORID")"
+	json_add_string "prl" "1,3,6,12,15,28,43"
+	json_add_int "leasetime" "$(num "$KDDI_LEASETIME")"
+	json_add_string "duid" "$duid"
+	json_add_string "model" "$KDDI_MODEL"
+	json_add_string "fqdn_hex" "$fqdn"
+	json_add_string "iaid" "$KDDI_IAID"
+	json_close_object
+}
+
+cmd_status() {
+	local dev cur
+
+	kddi_config_load
+	dev="$(kddi_wan_device)"
+	[ -n "$dev" ] && cur="$(cat "/sys/class/net/$dev/address" 2>/dev/null)"
+
+	json_init
+	json_add_boolean "enabled" "${KDDI_ENABLED:-0}"
+	json_add_string "device" "$dev"
+	json_add_string "macaddr" "$KDDI_MACADDR"
+	json_add_string "macaddr_current" "$cur"
+	json_add_boolean "macaddr_applied" \
+		"$([ -n "$cur" ] && [ "$(echo "$cur" | tr 'A-F' 'a-f')" = "$(echo "$KDDI_MACADDR" | tr 'A-F' 'a-f')" ] && echo 1 || echo 0)"
+
+	status_fingerprint
+	status_iface4 "$KDDI_WAN"
+	[ "$KDDI_IPV6" = 1 ] && status_iface6 "$KDDI_WAN6"
+	[ "$KDDI_IPV6" = 1 ] && status_map "$KDDI_WAN6"
+	status_dot1x "$dev"
+
+	json_add_object "packages"
+	json_add_boolean "proto" "$([ -f /lib/netifd/proto/kddi.sh ] && echo 1 || echo 0)"
+	json_add_boolean "proto_registered" "$(ubus call network get_proto_handlers 2>/dev/null | grep -q '"kddi"' && echo 1 || echo 0)"
+	json_add_boolean "map" "$([ -f /lib/netifd/proto/map.sh ] && echo 1 || echo 0)"
+	json_add_boolean "nat46" "$([ -f /proc/net/nat46/control ] && echo 1 || echo 0)"
+	json_close_object
+
+	json_add_array "backups"
+	for f in $(ls -1t "$KDDI_BACKUP_DIR"/network-* 2>/dev/null); do
+		json_add_string "" "$f"
+	done
+	json_close_array
+
+	json_dump
+}
+
+cmd_action() {
+	local input name rc=0 out
+
+	read -r input
+	[ -n "$input" ] || input="{}"
+	json_load "$input"
+	json_get_var name name
+
+	case "$name" in
+		apply)
+			out="$(/usr/libexec/kddi/kddi-apply apply 2>&1)"; rc=$?
+			[ $rc -eq 0 ] && { /etc/init.d/kddi enable; /etc/init.d/kddi restart >/dev/null 2>&1; }
+			;;
+		restore)
+			out="$(/usr/libexec/kddi/kddi-apply restore 2>&1)"; rc=$?
+			;;
+		renew)
+			kddi_config_load
+			out="$(ifup "$KDDI_WAN" 2>&1)"; rc=$?
+			[ "$KDDI_IPV6" = 1 ] && ifup "$KDDI_WAN6" >/dev/null 2>&1
+			out="${out:-renewing $KDDI_WAN}"
+			;;
+		restart)
+			out="$(/etc/init.d/kddi restart 2>&1)"; rc=$?
+			out="${out:-service restarted}"
+			;;
+		dot1x_reauth)
+			kddi_config_load
+			if [ -x /usr/sbin/wpa_cli ]; then
+				out="$(/usr/sbin/wpa_cli -i "$(kddi_wan_device)" -p "$KDDI_WPA_CTRL" reauthenticate 2>&1)"; rc=$?
+			else
+				out="wpa_cli is not installed"; rc=1
+			fi
+			;;
+		*)
+			out="unknown action '$name'"; rc=1
+			;;
+	esac
+
+	json_init
+	json_add_int "code" "$rc"
+	json_add_string "stdout" "$out"
+	json_dump
+}
+
+cmd_log() {
+	local input lines
+
+	read -r input
+	[ -n "$input" ] || input="{}"
+	json_load "$input"
+	json_get_var lines lines
+	[ "$lines" -gt 0 ] 2>/dev/null || lines=100
+
+	json_init
+	json_add_string "log" "$(logread 2>/dev/null | \
+		grep -E 'kddi|udhcpc|odhcp6c|wpa_supplicant|netifd' | tail -n "$lines")"
+	json_dump
+}
+
+case "$1" in
+	list)
+		json_init
+		json_add_object "status"; json_close_object
+		json_add_object "action"; json_add_string "name" ""; json_close_object
+		json_add_object "log"; json_add_int "lines" 0; json_close_object
+		json_dump
+		;;
+	call)
+		case "$2" in
+			status) cmd_status ;;
+			action) cmd_action ;;
+			log) cmd_log ;;
+			*) echo '{}' ;;
+		esac
+		;;
+esac

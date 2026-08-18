@@ -1,0 +1,14 @@
+# build output
+bin/
+build_dir/
+staging_dir/
+tmp/
+*.apk
+*.ipk
+*.tar.zst
+*.tar.xz
+
+# editors / OS
+.DS_Store
+*.swp
+*~

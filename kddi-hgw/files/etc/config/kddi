@@ -1,0 +1,52 @@
+# Powered by NyphexAI
+# Developed by Hikaru (i@rua.moe)
+# Copyright (C) 2026 Hikaru Chang <i@rua.moe>
+# SPDX-License-Identifier: GPL-3.0-or-later
+# KDDI au HIKARI home gateway emulation
+#
+# The values below reproduce the WAN side behaviour of a KDDI HGW.  Fill in
+# 'macaddr' with the WAN MAC address of your own HGW (printed on its label or
+# shown in its web UI) before enabling.
+
+config kddi 'settings'
+	option enabled '0'
+	# physical WAN device (e.g. eth1, wan, eth0.10)
+	option device ''
+	# logical interfaces that get rewritten by /usr/libexec/kddi/kddi-apply
+	option wan 'wan'
+	option wan6 'wan6'
+	# WAN MAC address of the HGW that is being replaced
+	option macaddr ''
+	# DHCPv4 option 60
+	option vendorid 'kddi-hgw1.1'
+	# DHCPv6 client FQDN (option 39) - HGW model name
+	option model 'RT5770VW'
+	# requested DHCPv4 lease time (option 51)
+	option leasetime '3600'
+	option ipv6 '1'
+	# IA_PD prefix hint: 'auto' or a prefix length such as 56 / 60
+	option reqprefix 'auto'
+	# IA_PD IAID as seen from the HGW
+	option iaid '00000001'
+	# let odhcp6c hand S46 (MAP-E/MAP-T/lw4o6) rules to the map protocol
+	option map '1'
+	# mark DHCPv4 frames with DSCP CS5 like the HGW does (needs nftables
+	# netdev egress support, purely cosmetic - off by default)
+	option dscp '0'
+	# keep the wan/wan6 interfaces inside the 'wan' firewall zone
+	option manage_firewall '1'
+
+config dot1x 'dot1x'
+	option enabled '0'
+	# MD5 / TLS / TTLS / PEAP
+	option eap 'MD5'
+	option eapol_version '1'
+	option identity ''
+	option password ''
+	option anonymous_identity ''
+	# inner authentication for TTLS/PEAP, e.g. auth=MSCHAPV2
+	option phase2 ''
+	option ca_cert ''
+	option client_cert ''
+	option priv_key ''
+	option priv_key_pwd ''

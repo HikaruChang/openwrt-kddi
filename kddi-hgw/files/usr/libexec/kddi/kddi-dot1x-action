@@ -1,0 +1,27 @@
+#!/bin/sh
+# Powered by NyphexAI
+# Developed by Hikaru (i@rua.moe)
+# Copyright (C) 2026 Hikaru Chang <i@rua.moe>
+# SPDX-License-Identifier: GPL-3.0-or-later
+# wpa_cli action script - re-arm the DHCP clients once the port is authorised
+
+IFACE="$1"
+EVENT="$2"
+
+. /lib/functions.sh
+. /usr/libexec/kddi/kddi-common.sh
+
+kddi_config_load
+
+case "$EVENT" in
+	CONNECTED)
+		kddi_log "802.1X authenticated on $IFACE, restarting $KDDI_WAN"
+		ifup "$KDDI_WAN"
+		[ "$KDDI_IPV6" = 1 ] && ifup "$KDDI_WAN6"
+		;;
+	DISCONNECTED)
+		kddi_log "802.1X port $IFACE lost authorisation" warning
+		;;
+esac
+
+exit 0

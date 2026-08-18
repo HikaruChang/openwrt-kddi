@@ -1,0 +1,160 @@
+# Powered by NyphexAI
+# Developed by Hikaru (i@rua.moe)
+# Copyright (C) 2026 Hikaru Chang <i@rua.moe>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+name: Build
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      openwrt_version:
+        description: 'OpenWrt release to build against'
+        required: false
+        default: '25.12.0'
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shell scripts
+        run: |
+          set -eu
+          for f in $(find kddi-hgw/files -type f); do
+            sh -n "$f"
+            echo "ok  $f"
+          done
+
+      - name: JavaScript
+        run: |
+          set -eu
+          for f in $(find luci-app-kddi -name '*.js'); do
+            node --check "$f"
+            echo "ok  $f"
+          done
+
+      - name: JSON
+        run: |
+          set -eu
+          for f in $(find . -name '*.json' -not -path './.git/*'); do
+            python3 -m json.tool "$f" > /dev/null
+            echo "ok  $f"
+          done
+
+  build:
+    name: Build apk packages
+    runs-on: ubuntu-latest
+    needs: lint
+    env:
+      # both packages are PKGARCH:=all, so a single target is enough
+      OPENWRT_VERSION: ${{ github.event.inputs.openwrt_version || '25.12.0' }}
+      TARGET: x86
+      SUBTARGET: 64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: src
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang flex bison g++ gawk gettext git file \
+            libncurses-dev libssl-dev python3 python3-setuptools rsync \
+            swig unzip wget zlib1g-dev zstd
+
+      - name: Fetch the OpenWrt SDK
+        run: |
+          set -eu
+          BASE="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARGET}/${SUBTARGET}"
+          curl -fsSL "$BASE/sha256sums" -o sha256sums
+          NAME="$(sed -n 's/^.*\*\(openwrt-sdk-.*\.tar\.\(zst\|xz\)\)$/\1/p' sha256sums | head -n1)"
+          test -n "$NAME"
+          echo "SDK: $NAME"
+          curl -fSL "$BASE/$NAME" -o "$NAME"
+          grep "\*$NAME\$" sha256sums | sha256sum -c -
+          mkdir sdk
+          case "$NAME" in
+            *.zst) tar --zstd -xf "$NAME" -C sdk --strip-components=1 ;;
+            *.xz)  tar -xJf  "$NAME" -C sdk --strip-components=1 ;;
+          esac
+
+      - name: Build
+        working-directory: sdk
+        run: |
+          set -eu
+          cp -r "$GITHUB_WORKSPACE/src/kddi-hgw" package/
+          cp -r "$GITHUB_WORKSPACE/src/luci-app-kddi" package/
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          make defconfig
+          cat >> .config <<-EOF
+          	CONFIG_PACKAGE_kddi-hgw=m
+          	CONFIG_PACKAGE_luci-app-kddi=m
+          	CONFIG_PACKAGE_luci-i18n-kddi-ja=m
+          	CONFIG_PACKAGE_luci-i18n-kddi-zh-cn=m
+          EOF
+          make defconfig
+          make package/kddi-hgw/compile -j"$(nproc)" V=s
+          make package/luci-app-kddi/compile -j"$(nproc)" V=s
+
+      - name: Collect packages
+        run: |
+          set -eu
+          mkdir -p artifacts
+          find sdk/bin -name 'kddi-hgw*.apk' -o -name 'luci-app-kddi*.apk' -o -name 'luci-i18n-kddi*.apk' \
+            | while read -r f; do cp "$f" artifacts/; done
+          ls -l artifacts
+          test "$(ls -1 artifacts | wc -l)" -ge 2
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: artifacts/*.apk
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: artifacts
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          cat > notes.md <<-'EOF'
+          	KDDI auひかり 用 OpenWrt プラグイン / KDDI au 光 OpenWrt 插件
+
+          	OpenWrt / ImmortalWrt 25.12 以降 (apk) 向け。パッケージは `PKGARCH:=all` のため
+          	アーキテクチャ非依存です。/ 适用于 25.12 及以后（apk），与 CPU 架构无关。
+
+          	```sh
+          	apk add --allow-untrusted ./kddi-hgw-*.apk ./luci-app-kddi-*.apk
+          	apk add --allow-untrusted ./luci-i18n-kddi-ja-*.apk      # ja UI
+          	apk add --allow-untrusted ./luci-i18n-kddi-zh-cn-*.apk   # zh UI
+          	/etc/init.d/network restart
+          	```
+          EOF
+          gh release create "$GITHUB_REF_NAME" artifacts/*.apk \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md

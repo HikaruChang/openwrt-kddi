@@ -1,0 +1,244 @@
+#!/bin/sh
+# Powered by NyphexAI
+# Developed by Hikaru (i@rua.moe)
+# Copyright (C) 2026 Hikaru Chang <i@rua.moe>
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Rewrite /etc/config/network so that this router presents itself to the
+# KDDI access network exactly like the home gateway it replaces.
+
+. /lib/functions.sh
+. /usr/libexec/kddi/kddi-common.sh
+
+# options of other WAN protocols that must not survive the switch
+KDDI_STALE_OPTS="username password ac service host_uniq pppd_options keepalive
+	demand ipaddr netmask gateway dns clientid hostname reqopts sendopts
+	defaultreqopts classlessroute broadcast reqaddress reqprefix ip6ifaceid
+	noclientfqdn iface_map zone_map iface_dslite iface_464xlat vendorid
+	leasetime"
+
+kddi_backup_network() {
+	local ts f
+
+	mkdir -p "$KDDI_BACKUP_DIR"
+	ts="$(date +%Y%m%d-%H%M%S)"
+	cp /etc/config/network "$KDDI_BACKUP_DIR/network-$ts" || return 1
+	kddi_msg "network configuration backed up to $KDDI_BACKUP_DIR/network-$ts"
+
+	# keep the five most recent backups
+	ls -1t "$KDDI_BACKUP_DIR"/network-* 2>/dev/null | tail -n +6 | \
+	while read -r f; do rm -f "$f"; done
+
+	return 0
+}
+
+kddi_purge_opts() {
+	local section="$1" opt
+
+	for opt in $KDDI_STALE_OPTS; do
+		uci -q delete "network.$section.$opt"
+	done
+}
+
+# find (or create) the 'config device' section that carries the MAC address
+kddi_device_section() {
+	local dev="$1" i=0 name sec
+
+	while uci -q get "network.@device[$i]" >/dev/null 2>&1; do
+		name="$(uci -q get "network.@device[$i].name")"
+		[ "$name" = "$dev" ] && { echo "@device[$i]"; return 0; }
+		i=$((i + 1))
+	done
+
+	sec="$(uci add network device 2>/dev/null)" || return 1
+	uci -q set "network.$sec.name=$dev"
+	echo "$sec"
+}
+
+kddi_apply_macaddr() {
+	local dev="$1" mac="$2" sec
+
+	sec="$(kddi_device_section "$dev")" || {
+		kddi_err "unable to create a device section for $dev"
+		return 1
+	}
+
+	if [ -n "$mac" ]; then
+		uci -q set "network.$sec.macaddr=$mac"
+		kddi_msg "cloning HGW MAC address $mac onto $dev"
+	else
+		kddi_msg "no HGW MAC address configured, keeping the factory address of $dev"
+	fi
+}
+
+kddi_apply_wan() {
+	local dev="$1"
+
+	uci -q set "network.$KDDI_WAN=interface"
+	kddi_purge_opts "$KDDI_WAN"
+	uci -q set "network.$KDDI_WAN.proto=kddi"
+	uci -q set "network.$KDDI_WAN.device=$dev"
+	uci -q set "network.$KDDI_WAN.vendorid=$KDDI_VENDORID"
+	uci -q set "network.$KDDI_WAN.leasetime=$KDDI_LEASETIME"
+
+	kddi_msg "$KDDI_WAN: proto kddi on $dev, vendor class '$KDDI_VENDORID'"
+}
+
+kddi_apply_wan6() {
+	local dev="$1" duid fqdn prefix opt
+
+	[ "$KDDI_IPV6" = 1 ] || {
+		uci -q delete "network.$KDDI_WAN6"
+		kddi_msg "$KDDI_WAN6: IPv6 disabled, interface removed"
+		return 0
+	}
+
+	prefix="$KDDI_REQPREFIX"
+	[ -z "$prefix" -o "$prefix" = "auto" ] && prefix="0"
+	echo "$KDDI_IAID" | grep -qE '^[0-9a-fA-F]{1,8}$' || KDDI_IAID="00000001"
+
+	uci -q set "network.$KDDI_WAN6=interface"
+	kddi_purge_opts "$KDDI_WAN6"
+	uci -q set "network.$KDDI_WAN6.proto=dhcpv6"
+	uci -q set "network.$KDDI_WAN6.device=$dev"
+
+	# the HGW solicits a prefix delegation only, it never asks for an address
+	uci -q set "network.$KDDI_WAN6.reqaddress=none"
+	uci -q set "network.$KDDI_WAN6.reqprefix=$prefix:$KDDI_IAID"
+
+	# DUID-LL built from the cloned MAC, exactly like the HGW
+	if duid="$(kddi_duid_ll "$KDDI_MACADDR")"; then
+		uci -q set "network.$KDDI_WAN6.clientid=$duid"
+	else
+		kddi_msg "no valid MAC address, letting netifd pick the DHCPv6 DUID"
+	fi
+
+	# option request list observed on the wire: DNS, search, NTP,
+	# prefix exclude, SOL_MAX_RT, S46 MAP-T container
+	uci -q set "network.$KDDI_WAN6.defaultreqopts=0"
+	for opt in 23 24 56 67 82 95; do
+		uci -q add_list "network.$KDDI_WAN6.reqopts=$opt"
+	done
+
+	# client FQDN carries the HGW model name instead of our hostname
+	if fqdn="$(kddi_fqdn_hex "$KDDI_MODEL")"; then
+		uci -q set "network.$KDDI_WAN6.noclientfqdn=1"
+		uci -q add_list "network.$KDDI_WAN6.sendopts=39:$fqdn"
+	fi
+
+	# link local address must stay EUI-64 derived from the cloned MAC
+	uci -q set "network.$KDDI_WAN6.ip6ifaceid=eui64"
+
+	if [ "$KDDI_MAP" = 1 ]; then
+		uci -q set "network.$KDDI_WAN6.zone_map=wan"
+		[ -f /lib/netifd/proto/map.sh ] || \
+			kddi_msg "note: the 'map' package is not installed, MAP-E/MAP-T rules will be ignored"
+	else
+		uci -q set "network.$KDDI_WAN6.iface_map=0"
+	fi
+
+	kddi_msg "$KDDI_WAN6: proto dhcpv6 on $dev, IA_PD only, DUID ${duid:-auto}, FQDN '$KDDI_MODEL'"
+}
+
+kddi_apply_firewall() {
+	local i=0 name net
+
+	[ "$KDDI_FIREWALL" = 1 ] || return 0
+	[ -f /etc/config/firewall ] || return 0
+
+	while uci -q get "firewall.@zone[$i]" >/dev/null 2>&1; do
+		name="$(uci -q get "firewall.@zone[$i].name")"
+		if [ "$name" = "wan" ]; then
+			for net in "$KDDI_WAN" "$KDDI_WAN6"; do
+				[ "$net" = "$KDDI_WAN6" ] && [ "$KDDI_IPV6" != 1 ] && continue
+				uci -q get "firewall.@zone[$i].network" | grep -qw "$net" || {
+					uci -q add_list "firewall.@zone[$i].network=$net"
+					kddi_msg "firewall: added $net to the wan zone"
+				}
+			done
+			uci -q commit firewall
+			return 0
+		fi
+		i=$((i + 1))
+	done
+
+	kddi_msg "firewall: no zone named 'wan' found, check the zone membership manually"
+}
+
+kddi_proto_registered() {
+	ubus call network get_proto_handlers 2>/dev/null | grep -q '"kddi"'
+}
+
+kddi_apply() {
+	local dev
+
+	kddi_config_load
+
+	[ "$KDDI_ENABLED" = 1 ] || {
+		kddi_err "KDDI support is disabled (set kddi.settings.enabled=1)"
+		return 1
+	}
+
+	dev="$(kddi_wan_device)"
+	[ -n "$dev" ] || {
+		kddi_err "no WAN device configured (set kddi.settings.device)"
+		return 1
+	}
+
+	[ -n "$KDDI_MACADDR" ] && ! kddi_mac_valid "$KDDI_MACADDR" && {
+		kddi_err "invalid HGW MAC address '$KDDI_MACADDR'"
+		return 1
+	}
+
+	kddi_backup_network || {
+		kddi_err "unable to back up /etc/config/network, aborting"
+		return 1
+	}
+
+	kddi_apply_macaddr "$dev" "$KDDI_MACADDR"
+	kddi_apply_wan "$dev"
+	kddi_apply_wan6 "$dev"
+
+	uci -q commit network
+	kddi_apply_firewall
+
+	if [ "$1" != "noreload" ]; then
+		if kddi_proto_registered; then
+			ubus call network reload >/dev/null 2>&1
+		else
+			kddi_msg "the kddi protocol handler is not loaded yet, restarting netifd"
+			/etc/init.d/network restart >/dev/null 2>&1
+		fi
+		[ -x /etc/init.d/firewall ] && /etc/init.d/firewall reload >/dev/null 2>&1
+		kddi_msg "network reloaded"
+	fi
+
+	return 0
+}
+
+kddi_restore() {
+	local file="$1"
+
+	[ -n "$file" ] || file="$(ls -1t "$KDDI_BACKUP_DIR"/network-* 2>/dev/null | head -n1)"
+	[ -n "$file" ] && [ -f "$file" ] || {
+		kddi_err "no network backup found in $KDDI_BACKUP_DIR"
+		return 1
+	}
+
+	# drop staged changes so they cannot be replayed on top of the restored file
+	uci -q revert network
+	cp "$file" /etc/config/network || return 1
+	ubus call network reload >/dev/null 2>&1
+	kddi_msg "restored network configuration from $file"
+}
+
+case "$1" in
+	apply)   kddi_apply "$2" ;;
+	restore) kddi_restore "$2" ;;
+	*)
+		cat >&2 <<USAGE
+Usage: kddi-apply apply [noreload]
+       kddi-apply restore [backup-file]
+USAGE
+		exit 1
+		;;
+esac

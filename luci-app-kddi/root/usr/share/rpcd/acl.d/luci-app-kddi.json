@@ -1,0 +1,21 @@
+{
+	"luci-app-kddi": {
+		"description": "Grant access to the KDDI au HIKARI configuration",
+		"read": {
+			"uci": [ "kddi", "network", "wireless" ],
+			"ubus": {
+				"kddi": [ "status", "log" ],
+				"luci-rpc": [ "getBoardJSON", "getHostHints", "getNetworkDevices" ],
+				"network": [ "get_proto_handlers" ],
+				"network.device": [ "status" ],
+				"network.interface": [ "dump" ]
+			}
+		},
+		"write": {
+			"uci": [ "kddi" ],
+			"ubus": {
+				"kddi": [ "action" ]
+			}
+		}
+	}
+}

@@ -1,0 +1,19 @@
+#!/bin/sh
+# Powered by NyphexAI
+# Developed by Hikaru (i@rua.moe)
+# Copyright (C) 2026 Hikaru Chang <i@rua.moe>
+# SPDX-License-Identifier: GPL-3.0-or-later
+# seed kddi.settings.device from the existing WAN interface on first install
+
+[ -f /etc/config/kddi ] || exit 0
+
+dev="$(uci -q get kddi.settings.device)"
+[ -n "$dev" ] || {
+	dev="$(uci -q get network.wan.device)"
+	[ -n "$dev" ] && {
+		uci -q set kddi.settings.device="$dev"
+		uci -q commit kddi
+	}
+}
+
+exit 0
